@@ -659,6 +659,16 @@ function Dashboard({clients,area,csvName,fileType,hasCoords,onNewFile,onBack}){
   const [predVal,setPredVal]=useState("");
   const [predResult,setPredResult]=useState(null);
   const [predicting,setPredicting]=useState(false);
+
+  // ── IBGE State ──
+  const [ibgeUF,setIbgeUF]=useState("");
+  const [ibgeMunicipios,setIbgeMunicipios]=useState([]);
+  const [ibgeLoading,setIbgeLoading]=useState(false);
+  const [ibgeMalha,setIbgeMalha]=useState(null);
+  const [ibgeMalhaUF,setIbgeMalhaUF]=useState("");
+  const [ibgeMalhaLoading,setIbgeMalhaLoading]=useState(false);
+  const [ibgeSearch,setIbgeSearch]=useState("");
+  const [ibgeError,setIbgeError]=useState("");
   const PAGE=12;
 
   const segs=area.segmentos;
@@ -750,6 +760,7 @@ function Dashboard({clients,area,csvName,fileType,hasCoords,onNewFile,onBack}){
     {id:"scatter",icon:"⬡",label:"Dispersão"},
     {id:"tabela",icon:"≡",label:"Dados"},
     {id:"predictor",icon:"🤖",label:"Preditor IA"},
+    {id:"ibge",icon:"🏛️",label:"API IBGE"},
   ];
 
   const card={background:C.panel,border:`1px solid ${C.border}`,borderRadius:12,padding:"16px 18px"};
@@ -1087,6 +1098,126 @@ function Dashboard({clients,area,csvName,fileType,hasCoords,onNewFile,onBack}){
                 O modelo MLP é treinado diretamente no seu navegador usando <strong style={{color:C.cyan}}>TensorFlow.js</strong> com os dados reais que você carregou — sem enviar nada para servidores. A predição usa os mesmos padrões RFM aprendidos dos seus dados para classificar novos registros nos segmentos de <strong style={{color:area.color}}>{area.label}</strong>.
               </div>
             </div>
+          </div>}
+
+          {/* IBGE API */}
+          {page==="ibge"&&<div style={{display:"flex",flexDirection:"column",gap:12}}>
+
+            {/* Header */}
+            <div style={{...card,borderLeft:`3px solid ${C.blue2}`}}>
+              <div style={{fontSize:12,fontWeight:700,color:C.blue2,marginBottom:4}}>🏛️ API IBGE — Dados Geoespaciais Oficiais</div>
+              <div style={{fontSize:10,color:C.text3,lineHeight:1.7}}>
+                Acesse dados oficiais do IBGE diretamente no navegador — municípios, malhas territoriais e dados populacionais. Zero autenticação, 100% gratuito.
+              </div>
+            </div>
+
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+
+              {/* Busca Municípios */}
+              <div style={card}>
+                <div style={{fontSize:12,fontWeight:700,color:C.blue2,marginBottom:12}}>🔍 Buscar Municípios por UF</div>
+                <div style={{display:"flex",gap:8,marginBottom:10}}>
+                  <select value={ibgeUF} onChange={e=>setIbgeUF(e.target.value)}
+                    style={{flex:1,background:C.bg3,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 10px",color:C.text,fontSize:12,outline:"none"}}>
+                    <option value="">Selecione o estado</option>
+                    {[["AC","Acre"],["AL","Alagoas"],["AP","Amapá"],["AM","Amazonas"],["BA","Bahia"],["CE","Ceará"],["DF","Distrito Federal"],["ES","Espírito Santo"],["GO","Goiás"],["MA","Maranhão"],["MT","Mato Grosso"],["MS","Mato Grosso do Sul"],["MG","Minas Gerais"],["PA","Pará"],["PB","Paraíba"],["PR","Paraná"],["PE","Pernambuco"],["PI","Piauí"],["RJ","Rio de Janeiro"],["RN","Rio Grande do Norte"],["RS","Rio Grande do Sul"],["RO","Rondônia"],["RR","Roraima"],["SC","Santa Catarina"],["SP","São Paulo"],["SE","Sergipe"],["TO","Tocantins"]].map(([uf,nome])=>(
+                      <option key={uf} value={uf}>{uf} — {nome}</option>
+                    ))}
+                  </select>
+                  <button onClick={async()=>{
+                    if(!ibgeUF)return;
+                    setIbgeLoading(true);setIbgeError("");setIbgeMunicipios([]);
+                    try{
+                      const r=await fetch(`https://servicodados.ibge.gov.br/api/v1/localidades/estados/${ibgeUF}/municipios`);
+                      const data=await r.json();
+                      setIbgeMunicipios(data.sort((a,b)=>a.nome.localeCompare(b.nome)));
+                    }catch(e){setIbgeError("Erro ao buscar municípios. Verifique sua conexão.");}
+                    setIbgeLoading(false);
+                  }} disabled={!ibgeUF||ibgeLoading}
+                    style={{padding:"8px 14px",borderRadius:8,border:"none",background:C.blue2,color:"#fff",cursor:!ibgeUF?"not-allowed":"pointer",fontSize:11,fontWeight:700,opacity:!ibgeUF?.5:1}}>
+                    {ibgeLoading?"⏳":"Buscar"}
+                  </button>
+                </div>
+                {ibgeMunicipios.length>0&&<>
+                  <input value={ibgeSearch} onChange={e=>setIbgeSearch(e.target.value)} placeholder="Filtrar município..."
+                    style={{width:"100%",background:C.bg3,border:`1px solid ${C.border}`,borderRadius:8,padding:"7px 10px",color:C.text,fontSize:11,outline:"none",marginBottom:8,boxSizing:"border-box"}}/>
+                  <div style={{fontSize:10,color:C.text3,marginBottom:6}}>{ibgeMunicipios.length} municípios · {ibgeUF}</div>
+                  <div style={{maxHeight:240,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>
+                    {ibgeMunicipios.filter(m=>m.nome.toLowerCase().includes(ibgeSearch.toLowerCase())).map(m=>(
+                      <div key={m.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 8px",borderRadius:6,background:C.bg3,fontSize:11}}>
+                        <span style={{color:C.text}}>{m.nome}</span>
+                        <span style={{fontSize:9,color:C.text3,fontFamily:"monospace"}}>{m.id}</span>
+                      </div>
+                    ))}
+                  </div>
+                </>}
+                {ibgeError&&<div style={{fontSize:11,color:C.red,marginTop:8}}>{ibgeError}</div>}
+              </div>
+
+              {/* Malha Territorial */}
+              <div style={card}>
+                <div style={{fontSize:12,fontWeight:700,color:C.blue2,marginBottom:12}}>🗺️ Malha Territorial — GeoJSON</div>
+                <div style={{fontSize:11,color:C.text2,marginBottom:10,lineHeight:1.6}}>
+                  Baixe a malha municipal de qualquer estado em GeoJSON direto da API do IBGE.
+                </div>
+                <div style={{display:"flex",gap:8,marginBottom:10}}>
+                  <select value={ibgeMalhaUF} onChange={e=>setIbgeMalhaUF(e.target.value)}
+                    style={{flex:1,background:C.bg3,border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 10px",color:C.text,fontSize:12,outline:"none"}}>
+                    <option value="">Selecione o estado</option>
+                    {[["11","RO"],["12","AC"],["13","AM"],["14","RR"],["15","PA"],["16","AP"],["17","TO"],["21","MA"],["22","PI"],["23","CE"],["24","RN"],["25","PB"],["26","PE"],["27","AL"],["28","SE"],["29","BA"],["31","MG"],["32","ES"],["33","RJ"],["35","SP"],["41","PR"],["42","SC"],["43","RS"],["50","MS"],["51","MT"],["52","GO"],["53","DF"]].map(([cod,uf])=>(
+                      <option key={cod} value={cod}>{uf}</option>
+                    ))}
+                  </select>
+                  <button onClick={async()=>{
+                    if(!ibgeMalhaUF)return;
+                    setIbgeMalhaLoading(true);setIbgeMalha(null);
+                    try{
+                      const url=`https://servicodados.ibge.gov.br/api/v2/malhas/${ibgeMalhaUF}?resolucao=5&formato=application/vnd.geo+json`;
+                      const r=await fetch(url);
+                      const data=await r.json();
+                      setIbgeMalha(data);
+                    }catch(e){setIbgeError("Erro ao buscar malha territorial.");}
+                    setIbgeMalhaLoading(false);
+                  }} disabled={!ibgeMalhaUF||ibgeMalhaLoading}
+                    style={{padding:"8px 14px",borderRadius:8,border:"none",background:C.blue2,color:"#fff",cursor:!ibgeMalhaUF?"not-allowed":"pointer",fontSize:11,fontWeight:700,opacity:!ibgeMalhaUF?.5:1}}>
+                    {ibgeMalhaLoading?"⏳":"Buscar"}
+                  </button>
+                </div>
+                {ibgeMalha&&<>
+                  <div style={{fontSize:10,color:C.green,marginBottom:8,fontWeight:600}}>✅ {ibgeMalha.features?.length||0} municípios carregados!</div>
+                  <div style={{borderRadius:8,overflow:"hidden",marginBottom:8,border:`1px solid ${C.border}`}}>
+                    <MapContainer center={[-15,-50]} zoom={4} style={{height:200,width:"100%"}} zoomControl={false}>
+                      <TileLayer url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png" attribution='&copy; CARTO'/>
+                      <GeoJSON data={ibgeMalha} style={{fillColor:C.blue2,weight:1,opacity:0.8,color:C.blue2,fillOpacity:0.2}}/>
+                    </MapContainer>
+                  </div>
+                  <button onClick={()=>{
+                    const blob=new Blob([JSON.stringify(ibgeMalha,null,2)],{type:"application/json"});
+                    const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`ibge_malha_${ibgeMalhaUF}.geojson`;a.click();
+                  }} style={{width:"100%",padding:"8px",borderRadius:8,border:`1px solid ${C.blue2}44`,background:`${C.blue2}12`,color:C.blue2,cursor:"pointer",fontSize:11,fontWeight:700}}>
+                    ↓ Baixar GeoJSON ({(JSON.stringify(ibgeMalha).length/1024).toFixed(0)} KB)
+                  </button>
+                </>}
+              </div>
+            </div>
+
+            {/* Info API */}
+            <div style={{...card,background:`linear-gradient(135deg,${C.bg2},${C.bg3})`,border:`1px solid ${C.blue2}33`}}>
+              <div style={{fontSize:11,fontWeight:700,color:C.blue2,marginBottom:8}}>📡 Endpoints IBGE utilizados</div>
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                {[
+                  ["Municípios por UF",`https://servicodados.ibge.gov.br/api/v1/localidades/estados/{UF}/municipios`],
+                  ["Malha municipal",`https://servicodados.ibge.gov.br/api/v2/malhas/{cod_uf}?resolucao=5&formato=application/vnd.geo+json`],
+                  ["Todos os estados",`https://servicodados.ibge.gov.br/api/v1/localidades/estados`],
+                ].map(([label,url])=>(
+                  <div key={label} style={{background:C.bg3,borderRadius:7,padding:"8px 10px"}}>
+                    <div style={{fontSize:10,color:C.blue2,fontWeight:600,marginBottom:3}}>{label}</div>
+                    <div style={{fontSize:9,color:C.text3,fontFamily:"monospace",wordBreak:"break-all"}}>{url}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
           </div>}
 
         </div>
