@@ -649,6 +649,16 @@ function Dashboard({clients,area,csvName,fileType,hasCoords,onNewFile,onBack}){
   const [sort,setSort]=useState({col:"mon",asc:false});
   const [tpage,setTpage]=useState(0);
   const [sideOpen,setSideOpen]=useState(true);
+  const [tfModel,setTfModel]=useState(null);
+  const [tfTraining,setTfTraining]=useState(false);
+  const [tfTrained,setTfTrained]=useState(false);
+  const [tfEpoch,setTfEpoch]=useState(0);
+  const [tfLoss,setTfLoss]=useState(null);
+  const [predRec,setPredRec]=useState("");
+  const [predFreq,setPredFreq]=useState("");
+  const [predVal,setPredVal]=useState("");
+  const [predResult,setPredResult]=useState(null);
+  const [predicting,setPredicting]=useState(false);
   const PAGE=12;
 
   const segs=area.segmentos;
@@ -660,16 +670,90 @@ function Dashboard({clients,area,csvName,fileType,hasCoords,onNewFile,onBack}){
   const srtd=[...filtered].sort((a,b)=>sort.asc?a[sort.col]-b[sort.col]:b[sort.col]-a[sort.col]);
   const tPages=Math.ceil(srtd.length/PAGE),pageD=srtd.slice(tpage*PAGE,(tpage+1)*PAGE);
 
+  // ── TF.js: treinar com dados reais do usuário ──
+  const trainModel = async () => {
+    if (!window.tf) { alert("TensorFlow.js não carregado ainda. Aguarde."); return; }
+    setTfTraining(true); setTfTrained(false); setTfEpoch(0); setTfLoss(null);
+    const tf = window.tf;
+
+    // Normalizar dados reais
+    const recs = clients.map(c=>c.rec), freqs = clients.map(c=>c.freq), mons = clients.map(c=>c.mon);
+    const norm = (arr) => { const mn=Math.min(...arr),mx=Math.max(...arr); return arr.map(v=>mx===mn?0.5:(v-mn)/(mx-mn)); };
+    const recN = norm(recs), freqN = norm(freqs), monN = norm(mons);
+    const recNorm = recN.map(v=>1-v); // recência invertida
+
+    const xs = clients.map((_,i) => [recNorm[i], freqN[i], monN[i]]);
+    const ys = clients.map(c => c.segIdx);
+
+    const xTensor = tf.tensor2d(xs);
+    const yTensor = tf.oneHot(tf.tensor1d(ys, "int32"), 5);
+
+    // Modelo MLP simples
+    const model = tf.sequential();
+    model.add(tf.layers.dense({ inputShape:[3], units:32, activation:"relu" }));
+    model.add(tf.layers.dropout({ rate:0.2 }));
+    model.add(tf.layers.dense({ units:16, activation:"relu" }));
+    model.add(tf.layers.dense({ units:5, activation:"softmax" }));
+    model.compile({ optimizer:tf.train.adam(0.01), loss:"categoricalCrossentropy", metrics:["accuracy"] });
+
+    await model.fit(xTensor, yTensor, {
+      epochs: 60,
+      batchSize: 32,
+      shuffle: true,
+      callbacks: {
+        onEpochEnd: (epoch, logs) => {
+          setTfEpoch(epoch+1);
+          setTfLoss(logs.loss.toFixed(4));
+        }
+      }
+    });
+
+    // Salvar parâmetros de normalização
+    const scaler = {
+      rec: { min: Math.min(...recs), max: Math.max(...recs) },
+      freq: { min: Math.min(...freqs), max: Math.max(...freqs) },
+      mon: { min: Math.min(...mons), max: Math.max(...mons) },
+    };
+    model._georfmScaler = scaler;
+
+    xTensor.dispose(); yTensor.dispose();
+    setTfModel(model);
+    setTfTraining(false);
+    setTfTrained(true);
+  };
+
+  const predict = async () => {
+    if (!tfModel) return;
+    const tf = window.tf;
+    setPredicting(true);
+    const sc = tfModel._georfmScaler;
+    const recV = parseFloat(predRec)||0;
+    const freqV = parseFloat(predFreq)||0;
+    const monV = parseFloat(predVal)||0;
+    const norm1 = (v,s) => s.max===s.min?0.5:(v-s.min)/(s.max-s.min);
+    const recN = 1 - norm1(recV, sc.rec);
+    const freqN = norm1(freqV, sc.freq);
+    const monN = norm1(monV, sc.mon);
+    const input = tf.tensor2d([[recN, freqN, monN]]);
+    const pred = tfModel.predict(input);
+    const probs = Array.from(await pred.data());
+    const segIdx = probs.indexOf(Math.max(...probs));
+    input.dispose(); pred.dispose();
+    setPredResult({ segIdx, probs, rec:recV, freq:freqV, mon:monV });
+    setPredicting(false);
+  };
+
   const navItems=[
     {id:"overview",icon:"◉",label:"Visão Geral"},
     {id:"mapa",icon:"🗺️",label:"Mapa"},
     {id:"analytics",icon:"📊",label:"Análise Gráfica"},
     {id:"scatter",icon:"⬡",label:"Dispersão"},
     {id:"tabela",icon:"≡",label:"Dados"},
+    {id:"predictor",icon:"🤖",label:"Preditor IA"},
   ];
 
   const card={background:C.panel,border:`1px solid ${C.border}`,borderRadius:12,padding:"16px 18px"};
-  const fileIcon=fileType==="excel"?"📊":"📄";
+  const fileIcon=fileType==="excel"?"📊":fileType==="shapefile"?"🗂️":"📄";
 
   return(
     <div style={{display:"flex",height:"100vh",fontFamily:"system-ui,sans-serif",background:C.bg,color:C.text,fontSize:13}}>
@@ -888,6 +972,120 @@ function Dashboard({clients,area,csvName,fileType,hasCoords,onNewFile,onBack}){
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:12,fontSize:11,color:C.text3}}>
               <span>Página {tpage+1} de {tPages||1} · {filtered.length} registros</span>
               <div style={{display:"flex",gap:6}}>{["← Anterior","Próxima →"].map((lb,di)=>{const dis=di===0?tpage===0:tpage>=tPages-1;return <button key={lb} onClick={()=>setTpage(p=>di===0?Math.max(0,p-1):Math.min(tPages-1,p+1))} disabled={dis} style={{padding:"5px 10px",border:`1px solid ${C.border}`,borderRadius:7,background:"transparent",cursor:dis?"not-allowed":"pointer",opacity:dis?.4:1,fontSize:11,color:C.text2}}>{lb}</button>;})}</div>
+            </div>
+          </div>}
+
+          {/* Preditor IA */}
+          {page==="predictor"&&<div style={{display:"flex",flexDirection:"column",gap:12}}>
+            {/* Info */}
+            <div style={{...card,borderLeft:`3px solid ${area.color}`}}>
+              <div style={{fontSize:12,fontWeight:700,color:area.color,marginBottom:4}}>🤖 Preditor de Segmento — TensorFlow.js</div>
+              <div style={{fontSize:10,color:C.text3,lineHeight:1.7}}>
+                O modelo aprende com os <strong style={{color:C.text}}>{clients.length} registros reais</strong> que você carregou e prediz o segmento de novos dados. Zero backend — treina 100% no navegador.
+              </div>
+            </div>
+
+            {/* Treinar */}
+            {!tfTrained&&<div style={card}>
+              <div style={{fontSize:12,fontWeight:700,marginBottom:12}}>1️⃣ Treinar modelo com seus dados</div>
+              {tfTraining?(
+                <div style={{textAlign:"center",padding:"24px 0"}}>
+                  <div style={{fontSize:13,fontWeight:600,color:area.color,marginBottom:8}}>🔄 Treinando... Época {tfEpoch}/60</div>
+                  <div style={{width:"100%",height:8,background:C.border,borderRadius:4,overflow:"hidden",marginBottom:8}}>
+                    <div style={{width:`${(tfEpoch/60)*100}%`,height:"100%",background:`linear-gradient(90deg,${area.color},${C.cyan})`,borderRadius:4,transition:"width .3s"}}/>
+                  </div>
+                  {tfLoss&&<div style={{fontSize:11,color:C.text3}}>Loss: <strong style={{color:area.color}}>{tfLoss}</strong></div>}
+                </div>
+              ):(
+                <div>
+                  <div style={{fontSize:11,color:C.text2,marginBottom:14,lineHeight:1.6}}>
+                    O modelo MLP (Multi-Layer Perceptron) vai aprender com os padrões RFM dos seus dados reais — Recência, Frequência e Valor — e mapear para os 5 segmentos de <strong style={{color:area.color}}>{area.label}</strong>.
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
+                    {[["📥 Entrada","3 features: R, F, M normalizados",C.blue2],["🧠 Arquitetura","MLP: 3→32→16→5 neurônios",area.color],["📤 Saída","5 segmentos com probabilidade",C.green]].map(([t,d,c])=>(
+                      <div key={t} style={{background:C.bg3,borderRadius:8,padding:"10px 12px"}}>
+                        <div style={{fontSize:10,fontWeight:700,color:c,marginBottom:4}}>{t}</div>
+                        <div style={{fontSize:10,color:C.text2}}>{d}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <button onClick={trainModel} style={{width:"100%",background:`linear-gradient(135deg,${area.color},${C.cyan})`,border:"none",color:"#fff",padding:"12px",borderRadius:10,cursor:"pointer",fontSize:13,fontWeight:700}}>
+                    🚀 Treinar com {clients.length} registros reais
+                  </button>
+                </div>
+              )}
+            </div>}
+
+            {/* Treinado! */}
+            {tfTrained&&<div style={{...card,border:`1px solid ${C.green}44`,background:`${C.green}08`}}>
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+                <div style={{fontSize:24}}>✅</div>
+                <div>
+                  <div style={{fontSize:13,fontWeight:700,color:C.green}}>Modelo treinado com sucesso!</div>
+                  <div style={{fontSize:10,color:C.text3}}>60 épocas · {clients.length} registros reais · Loss final: {tfLoss}</div>
+                </div>
+                <button onClick={trainModel} style={{marginLeft:"auto",padding:"5px 12px",borderRadius:7,border:`1px solid ${C.border}`,background:"transparent",color:C.text2,cursor:"pointer",fontSize:10}}>↻ Retreinar</button>
+              </div>
+            </div>}
+
+            {/* Predição */}
+            {tfTrained&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+              <div style={card}>
+                <div style={{fontSize:12,fontWeight:700,marginBottom:14}}>2️⃣ Inserir novo registro</div>
+                {[
+                  {label:`Recência (${area.rfm.r})`,val:predRec,set:setPredRec,placeholder:"Ex: 45",color:C.blue2},
+                  {label:`Frequência (${area.rfm.f})`,val:predFreq,set:setPredFreq,placeholder:"Ex: 3",color:C.green},
+                  {label:`Valor (${area.rfm.m})`,val:predVal,set:setPredVal,placeholder:"Ex: 750",color:area.color},
+                ].map(({label,val,set,placeholder,color})=>(
+                  <div key={label} style={{marginBottom:14}}>
+                    <div style={{fontSize:10,color:C.text2,marginBottom:5}}>{label}</div>
+                    <input value={val} onChange={e=>set(e.target.value)} placeholder={placeholder} type="number"
+                      style={{width:"100%",background:C.bg3,border:`1px solid ${C.border}`,borderRadius:8,padding:"9px 12px",color:C.text,fontSize:13,outline:"none",boxSizing:"border-box",fontFamily:"system-ui"}}/>
+                  </div>
+                ))}
+                <button onClick={predict} disabled={predicting||!predRec||!predFreq||!predVal}
+                  style={{width:"100%",background:`linear-gradient(135deg,${area.color},${C.cyan})`,border:"none",color:"#fff",padding:"11px",borderRadius:9,cursor:"pointer",fontSize:13,fontWeight:700,opacity:(!predRec||!predFreq||!predVal)?.5:1}}>
+                  {predicting?"🔄 Processando...":"🎯 Prever Segmento"}
+                </button>
+              </div>
+
+              <div style={card}>
+                <div style={{fontSize:12,fontWeight:700,marginBottom:14}}>3️⃣ Resultado da predição</div>
+                {predResult?(
+                  <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                    <div style={{textAlign:"center",padding:"20px",borderRadius:12,background:`${colors[predResult.segIdx]}18`,border:`2px solid ${colors[predResult.segIdx]}`}}>
+                      <div style={{fontSize:32,marginBottom:8}}>{["⭐","✅","📊","⚠️","🔴"][predResult.segIdx]}</div>
+                      <div style={{fontSize:20,fontWeight:800,color:colors[predResult.segIdx]}}>{segs[predResult.segIdx]}</div>
+                      <div style={{fontSize:11,color:C.text3,marginTop:4}}>{area.label}</div>
+                    </div>
+                    <div>
+                      <div style={{fontSize:10,fontWeight:600,color:C.text3,marginBottom:8}}>Probabilidade por segmento:</div>
+                      {predResult.probs.map((p,i)=>(
+                        <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                          <span style={{fontSize:10,color:colors[i],minWidth:90,fontWeight:i===predResult.segIdx?700:400}}>{segs[i]}</span>
+                          <div style={{flex:1,height:6,background:C.border,borderRadius:3,overflow:"hidden"}}>
+                            <div style={{width:`${p*100}%`,height:"100%",background:colors[i],borderRadius:3,transition:"width .5s"}}/>
+                          </div>
+                          <span style={{fontSize:10,fontWeight:i===predResult.segIdx?700:400,color:i===predResult.segIdx?colors[i]:C.text3,minWidth:36}}>{(p*100).toFixed(1)}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ):(
+                  <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:200,color:C.text3,gap:10}}>
+                    <div style={{fontSize:36}}>🎯</div>
+                    <div style={{fontSize:12}}>Preencha os campos e clique em Prever</div>
+                  </div>
+                )}
+              </div>
+            </div>}
+
+            {/* Explicação */}
+            <div style={{...card,background:`linear-gradient(135deg,${C.bg2},${C.bg3})`,border:`1px solid ${area.color}33`}}>
+              <div style={{fontSize:11,fontWeight:700,color:area.color,marginBottom:8}}>🧠 Como funciona o Deep Learning aqui</div>
+              <div style={{fontSize:11,color:C.text2,lineHeight:1.8}}>
+                O modelo MLP é treinado diretamente no seu navegador usando <strong style={{color:C.cyan}}>TensorFlow.js</strong> com os dados reais que você carregou — sem enviar nada para servidores. A predição usa os mesmos padrões RFM aprendidos dos seus dados para classificar novos registros nos segmentos de <strong style={{color:area.color}}>{area.label}</strong>.
+              </div>
             </div>
           </div>}
 
