@@ -397,68 +397,82 @@ function GeoMap({clients,area}){
   const withGeom=clients.filter(c=>c.geometry);
   const withPoints=clients.filter(c=>c.lat&&c.lon&&!isNaN(c.lat)&&!isNaN(c.lon)&&!c.geometry);
   const withCoords=clients.filter(c=>(c.lat&&c.lon&&!isNaN(c.lat)&&!isNaN(c.lon))||c.geometry);
-
-  if(!withCoords.length){
-    return(
-      <div style={{background:C.bg3,borderRadius:10,padding:32,textAlign:"center",border:`1px dashed ${C.border2}`}}>
-        <div style={{fontSize:32,marginBottom:12}}>🗺️</div>
-        <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:8}}>Mapa não disponível</div>
-        <div style={{fontSize:11,color:C.text2,lineHeight:1.7,maxWidth:400,margin:"0 auto"}}>
-          Sem coordenadas geográficas no arquivo.<br/>
-          Para CSV/Excel: adicione <strong style={{color:area.color}}>latitude</strong> e <strong style={{color:area.color}}>longitude</strong>.<br/>
-          Para geometria vetorial: use um <strong style={{color:area.color}}>Shapefile (.shp + .dbf)</strong>.
-        </div>
-      </div>
-    );
-  }
-
+  const [ibgeMalha,setIbgeMalha]=useState(null);
+  const [ibgeLoading,setIbgeLoading]=useState(false);
+  const [ibgeLoaded,setIbgeLoaded]=useState(false);
+  const isIbgeCod=clients.length>0&&/^\d{7}$/.test(String(clients[0].id));
+  const detectUF=()=>isIbgeCod?String(clients[0].id).slice(0,2):null;
+  const loadIbgeMalha=async()=>{
+    const uf=detectUF();if(!uf)return;
+    setIbgeLoading(true);
+    try{const r=await fetch(`https://servicodados.ibge.gov.br/api/v2/malhas/${uf}?resolucao=5&formato=application/vnd.geo+json`);const data=await r.json();setIbgeMalha(data);setIbgeLoaded(true);}
+    catch(e){console.error("Erro IBGE:",e);}
+    setIbgeLoading(false);
+  };
+  const getChoroplethStyle=feature=>{
+    const cod=String(feature.properties?.codarea||feature.properties?.CD_MUN||feature.properties?.id||"");
+    const client=clients.find(c=>String(c.id)===cod||String(c.id)===cod.slice(0,7));
+    if(!client)return{fillColor:"#1e3050",weight:0.5,opacity:0.5,color:C.border2,fillOpacity:0.2};
+    return{fillColor:colors[client.segIdx],weight:1.5,opacity:0.9,color:colors[client.segIdx],fillOpacity:0.7};
+  };
+  const onEachChoropleth=(feature,layer)=>{
+    const cod=String(feature.properties?.codarea||feature.properties?.CD_MUN||feature.properties?.id||"");
+    const client=clients.find(c=>String(c.id)===cod||String(c.id)===cod.slice(0,7));
+    if(client)layer.bindPopup(`<div style="font-family:system-ui;font-size:12px;min-width:160px"><b style="color:${colors[client.segIdx]}">${client.id}</b><br/><b>Segmento:</b> ${area.segmentos[client.segIdx]}<br/><b>Recência:</b> ${client.rec}d<br/><b>Frequência:</b> ${client.freq}x<br/><b>Valor:</b> ${fK(client.mon)}</div>`);
+    else layer.bindPopup(`<div style="font-family:system-ui;font-size:11px;color:#666">Código: ${cod}<br/>Sem dados</div>`);
+  };
+  const geojsonData=withGeom.length?{type:"FeatureCollection",features:withGeom.map(c=>({type:"Feature",geometry:c.geometry,properties:{id:c.id,segIdx:c.segIdx}}))}:null;
+  const getStyle=feature=>{const segIdx=feature.properties?.segIdx??2;return{fillColor:colors[segIdx]||area.color,weight:1.5,opacity:0.9,color:colors[segIdx]||area.color,fillOpacity:0.6};};
+  const onEachFeature=(feature,layer)=>{const c=clients.find(c=>c.id===feature.properties?.id);if(c)layer.bindPopup(`<div style="font-family:system-ui;font-size:12px"><b style="color:${colors[c.segIdx]}">${c.id}</b><br/>${area.segmentos[c.segIdx]}<br/>${c.rec}d · ${c.freq}x · ${fK(c.mon)}</div>`);};
   const allLats=withCoords.map(c=>c.lat).filter(Boolean);
   const allLons=withCoords.map(c=>c.lon).filter(Boolean);
   const centerLat=allLats.length?allLats.reduce((a,b)=>a+b,0)/allLats.length:-15;
   const centerLon=allLons.length?allLons.reduce((a,b)=>a+b,0)/allLons.length:-50;
-
-  const geojsonData=withGeom.length?{type:"FeatureCollection",features:withGeom.map(c=>({type:"Feature",geometry:c.geometry,properties:{id:c.id,segIdx:c.segIdx}}))}:null;
-
-  const getStyle=feature=>{
-    const segIdx=feature.properties?.segIdx??2;
-    return{fillColor:colors[segIdx]||area.color,weight:1.5,opacity:0.9,color:colors[segIdx]||area.color,fillOpacity:0.6};
-  };
-
-  const onEachFeature=(feature,layer)=>{
-    const c=clients.find(c=>c.id===feature.properties?.id);
-    if(c) layer.bindPopup(`<div style="font-family:system-ui;font-size:12px;min-width:150px"><b style="color:${colors[c.segIdx]}">${c.id}</b><br/><b>Segmento:</b> ${area.segmentos[c.segIdx]}<br/><b>Recência:</b> ${c.rec}d<br/><b>Frequência:</b> ${c.freq}x<br/><b>Valor:</b> ${fK(c.mon)}</div>`);
-  };
-
   return(
-    <div style={{borderRadius:10,overflow:"hidden",border:`1px solid ${C.border}`}}>
-      <MapContainer center={[centerLat,centerLon]} zoom={5} style={{height:440,width:"100%"}} zoomControl={false}>
-        <TileLayer url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png" attribution='&copy; CARTO'/>
-        <ZoomControl position="bottomright"/>
-        {geojsonData&&<GeoJSON data={geojsonData} style={getStyle} onEachFeature={onEachFeature}/>}
-        {withPoints.map(c=>(
-          <CircleMarker key={c.id} center={[c.lat,c.lon]} radius={6+c.freq*0.5}
-            fillColor={colors[c.segIdx]||area.color} color={colors[c.segIdx]||area.color}
-            weight={2} opacity={0.9} fillOpacity={0.7}>
-            <Popup>
-              <div style={{fontFamily:"system-ui",fontSize:12,minWidth:160}}>
-                <div style={{fontWeight:700,marginBottom:6,color:colors[c.segIdx]||area.color}}>{c.id}</div>
-                <div><strong>Segmento:</strong> {area.segmentos[c.segIdx]}</div>
-                <div><strong>Recência:</strong> {c.rec} dias</div>
-                <div><strong>Frequência:</strong> {c.freq}x</div>
-                <div><strong>Valor:</strong> {fK(c.mon)}</div>
-              </div>
-            </Popup>
-          </CircleMarker>
-        ))}
-      </MapContainer>
-      <div style={{padding:"8px 12px",background:C.bg3,display:"flex",gap:12,flexWrap:"wrap",alignItems:"center"}}>
-        <span style={{fontSize:10,color:C.text3}}>{withCoords.length} feições {withGeom.length>0?`· ${withGeom.length} polígonos`:""}</span>
-        {area.segmentos.map((s,i)=>(
-          <span key={s} style={{fontSize:10,display:"flex",alignItems:"center",gap:4,color:C.text2}}>
-            <span style={{width:8,height:8,borderRadius:"50%",background:colors[i],display:"inline-block"}}/>{s}
-          </span>
-        ))}
-      </div>
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      {isIbgeCod&&!ibgeLoaded&&(
+        <div style={{background:`${C.blue2}12`,border:`1px solid ${C.blue2}44`,borderRadius:10,padding:"12px 16px",display:"flex",alignItems:"center",gap:12}}>
+          <div style={{fontSize:20}}>🏛️</div>
+          <div style={{flex:1}}>
+            <div style={{fontSize:12,fontWeight:700,color:C.blue2,marginBottom:2}}>Códigos IBGE detectados!</div>
+            <div style={{fontSize:10,color:C.text3}}>Clique para carregar a malha municipal e colorir os municípios por segmento.</div>
+          </div>
+          <button onClick={loadIbgeMalha} disabled={ibgeLoading} style={{padding:"8px 16px",borderRadius:8,border:"none",background:C.blue2,color:"#fff",cursor:"pointer",fontSize:11,fontWeight:700,flexShrink:0}}>
+            {ibgeLoading?"⏳ Carregando...":"🗺️ Mapa Coroplético"}
+          </button>
+        </div>
+      )}
+      {(withCoords.length>0||ibgeMalha)?(
+        <div style={{borderRadius:10,overflow:"hidden",border:`1px solid ${C.border}`}}>
+          <MapContainer center={[centerLat,centerLon]} zoom={5} style={{height:440,width:"100%"}} zoomControl={false}>
+            <TileLayer url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png" attribution='&copy; CARTO'/>
+            <ZoomControl position="bottomright"/>
+            {ibgeMalha&&<GeoJSON key="ibge" data={ibgeMalha} style={getChoroplethStyle} onEachFeature={onEachChoropleth}/>}
+            {geojsonData&&!ibgeMalha&&<GeoJSON data={geojsonData} style={getStyle} onEachFeature={onEachFeature}/>}
+            {withPoints.map(c=>(
+              <CircleMarker key={c.id} center={[c.lat,c.lon]} radius={6+c.freq*0.5} fillColor={colors[c.segIdx]||area.color} color={colors[c.segIdx]||area.color} weight={2} opacity={0.9} fillOpacity={0.7}>
+                <Popup><div style={{fontFamily:"system-ui",fontSize:12,minWidth:160}}><div style={{fontWeight:700,marginBottom:6,color:colors[c.segIdx]||area.color}}>{c.id}</div><div><strong>Segmento:</strong> {area.segmentos[c.segIdx]}</div><div><strong>Recência:</strong> {c.rec} dias</div><div><strong>Frequência:</strong> {c.freq}x</div><div><strong>Valor:</strong> {fK(c.mon)}</div></div></Popup>
+              </CircleMarker>
+            ))}
+          </MapContainer>
+          <div style={{padding:"8px 12px",background:C.bg3,display:"flex",gap:12,flexWrap:"wrap",alignItems:"center"}}>
+            {ibgeMalha&&<span style={{fontSize:10,color:C.blue2,fontWeight:600}}>🏛️ Malha IBGE · {ibgeMalha.features?.length} municípios</span>}
+            {!ibgeMalha&&<span style={{fontSize:10,color:C.text3}}>{withCoords.length} feições no mapa</span>}
+            {area.segmentos.map((s,i)=><span key={s} style={{fontSize:10,display:"flex",alignItems:"center",gap:4,color:C.text2}}><span style={{width:8,height:8,borderRadius:"50%",background:colors[i],display:"inline-block"}}/>{s}</span>)}
+          </div>
+        </div>
+      ):(
+        <div style={{background:C.bg3,borderRadius:10,padding:32,textAlign:"center",border:`1px dashed ${C.border2}`}}>
+          <div style={{fontSize:32,marginBottom:12}}>🗺️</div>
+          <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:8}}>Mapa não disponível</div>
+          <div style={{fontSize:11,color:C.text2,lineHeight:1.7,maxWidth:400,margin:"0 auto"}}>
+            Sem coordenadas geográficas no arquivo.<br/>
+            Para CSV/Excel: adicione <strong style={{color:area.color}}>latitude</strong> e <strong style={{color:area.color}}>longitude</strong>.<br/>
+            Para mapa coroplético: use <strong style={{color:C.blue2}}>código IBGE de 7 dígitos</strong> como ID.<br/>
+            Para geometria vetorial: use um <strong style={{color:area.color}}>Shapefile (.shp + .dbf)</strong>.
+          </div>
+        </div>
+      )}
     </div>
   );
 }
