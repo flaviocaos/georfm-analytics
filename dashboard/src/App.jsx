@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from "react";
-import { MapContainer, TileLayer, CircleMarker, Popup, ZoomControl } from "react-leaflet";
+import { MapContainer, TileLayer, CircleMarker, GeoJSON, Popup, ZoomControl } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import * as XLSX from "xlsx";
+import * as shapefile from "shapefile";
 
 // ── Paleta ──
 const C = {
@@ -114,32 +115,74 @@ function parseExcel(buffer) {
   });
 }
 
+async function parseShapefile(shpBuffer, dbfBuffer) {
+  const source = await shapefile.open(shpBuffer, dbfBuffer);
+  const features = [];
+  let result;
+  while (!(result = await source.read()).done) {
+    features.push(result.value);
+  }
+  return features.map(f => {
+    const props = {};
+    Object.keys(f.properties||{}).forEach(k => {
+      props[k.toLowerCase().trim().replace(/\s+/g,"_")] = String(f.properties[k]||"").trim();
+    });
+    let lat = null, lon = null;
+    if (f.geometry) {
+      const c = extractCentroid(f.geometry);
+      lat = c.lat; lon = c.lon;
+    }
+    return { ...props, _geometry: f.geometry, _lat: lat, _lon: lon };
+  });
+}
+
+function extractCentroid(geometry) {
+  if (!geometry) return { lat: null, lon: null };
+  try {
+    const type = geometry.type;
+    const coords = geometry.coordinates;
+    if (type === "Point") return { lat: coords[1], lon: coords[0] };
+    if (type === "MultiPoint") { const avg = coords.reduce((a,c)=>({lat:a.lat+c[1],lon:a.lon+c[0]}),{lat:0,lon:0}); return {lat:avg.lat/coords.length,lon:avg.lon/coords.length}; }
+    if (type === "LineString") { const mid = coords[Math.floor(coords.length/2)]; return {lat:mid[1],lon:mid[0]}; }
+    if (type === "Polygon") { const ring = coords[0]; const avg = ring.reduce((a,c)=>({lat:a.lat+c[1],lon:a.lon+c[0]}),{lat:0,lon:0}); return {lat:avg.lat/ring.length,lon:avg.lon/ring.length}; }
+    if (type === "MultiPolygon") { const ring = coords[0][0]; const avg = ring.reduce((a,c)=>({lat:a.lat+c[1],lon:a.lon+c[0]}),{lat:0,lon:0}); return {lat:avg.lat/ring.length,lon:avg.lon/ring.length}; }
+  } catch(e) {}
+  return { lat: null, lon: null };
+}
+
 function detectCols(rows) {
   if (!rows.length) return {};
-  const keys = Object.keys(rows[0]);
-  const idCol = keys.find(k => k.includes("id") || k.includes("area") || k.includes("setor") || k.includes("municipio") || k.includes("talhao") || k.includes("estacao") || k.includes("aoi") || k.includes("ativo")) || keys[0];
-  const dateCol = keys.find(k => k.includes("data") || k.includes("date") || k.includes("dt")) || keys[1];
-  const valCol = keys.find(k => !k.includes("id") && !k.includes("data") && !k.includes("date") && !k.includes("lat") && !k.includes("lon") && !k.includes("lng") && k !== idCol && k !== dateCol) || keys[2];
+  const keys = Object.keys(rows[0]).filter(k => !k.startsWith("_"));
+  const idCol = keys.find(k => k.includes("id") || k.includes("cod") || k.includes("code") || k.includes("area") || k.includes("setor") || k.includes("municipio") || k.includes("talhao") || k.includes("estacao") || k.includes("aoi") || k.includes("ativo") || k.includes("nm_") || k.includes("nome")) || keys[0];
+  const dateCol = keys.find(k => k.includes("data") || k.includes("date") || k.includes("dt") || k.includes("ano") || k.includes("year"));
+  const valCol = keys.find(k => !k.includes("id") && !k.includes("cod") && !k.includes("data") && !k.includes("date") && !k.includes("lat") && !k.includes("lon") && !k.includes("lng") && !k.includes("nome") && !k.includes("name") && k !== idCol && k !== dateCol && rows[0][k] && !isNaN(parseFloat(rows[0][k])));
   const latCol = keys.find(k => k.includes("lat"));
   const lonCol = keys.find(k => k.includes("lon") || k.includes("lng"));
   return { idCol, dateCol, valCol, latCol, lonCol };
 }
 
-function buildClients(rows, cols, k=5) {
+function buildClients(rows, cols, k=5, isShapefile=false) {
   const { idCol, dateCol, valCol, latCol, lonCol } = cols;
   const map = {}, now = new Date("2024-12-31");
   rows.forEach(r => {
     const id = r[idCol];
-    const dStr = r[dateCol];
-    if (!id || !dStr) return;
-    const d = new Date(dStr);
-    if (isNaN(d)) return;
-    if (!map[id]) map[id] = { id, last:d, freq:0, mon:0, lat:null, lon:null };
-    if (d > map[id].last) map[id].last = d;
+    if (!id) return;
+    const dStr = dateCol ? r[dateCol] : "2024-01-01";
+    const d = new Date(dStr || "2024-01-01");
+    const validDate = !isNaN(d) ? d : new Date("2024-01-01");
+    const val = valCol ? parseFloat(r[valCol]) : 0;
+    if (!map[id]) map[id] = { id, last:validDate, freq:0, mon:0, lat:null, lon:null, geometry:null };
+    if (validDate > map[id].last) map[id].last = validDate;
     map[id].freq++;
-    map[id].mon += parseFloat(r[valCol])||0;
-    if (latCol && r[latCol]) map[id].lat = parseFloat(r[latCol]);
-    if (lonCol && r[lonCol]) map[id].lon = parseFloat(r[lonCol]);
+    map[id].mon += isNaN(val) ? 0 : val;
+    if (isShapefile) {
+      if (r._lat) map[id].lat = r._lat;
+      if (r._lon) map[id].lon = r._lon;
+      if (r._geometry) map[id].geometry = r._geometry;
+    } else {
+      if (latCol && r[latCol]) map[id].lat = parseFloat(r[latCol]);
+      if (lonCol && r[lonCol]) map[id].lon = parseFloat(r[lonCol]);
+    }
   });
   let arr = Object.values(map).map(c => ({
     ...c, rec:Math.floor((now-c.last)/864e5), mon:parseFloat(c.mon.toFixed(4))
@@ -190,6 +233,17 @@ function exportExcel(clients, area) {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "GeoRFM");
   XLSX.writeFile(wb, `georfm_${area.id}.xlsx`);
+}
+
+function exportGeoJSON(clients, area) {
+  const segs = area.segmentos;
+  const features = clients.filter(c => c.geometry || (c.lat && c.lon)).map(c => ({
+    type: "Feature",
+    geometry: c.geometry || { type: "Point", coordinates: [c.lon, c.lat] },
+    properties: { id: c.id, segmento: segs[c.segIdx], recencia: c.rec, frequencia: c.freq, valor_medio: parseFloat(c.mon.toFixed(4)), r_score: c.rs, f_score: c.fs, m_score: c.ms }
+  }));
+  const blob = new Blob([JSON.stringify({ type: "FeatureCollection", features }, null, 2)], { type: "application/json" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `georfm_${area.id}.geojson`; a.click();
 }
 
 const fK=v=>v>=1000000?`${(v/1000000).toFixed(1)}M`:v>=1000?`${(v/1000).toFixed(1)}k`:String(parseFloat((v||0).toFixed(2)));
@@ -340,30 +394,48 @@ function ScatterCanvas({data,area,hovId,setHov}){
 // ── Mapa Leaflet ──
 function GeoMap({clients,area}){
   const colors=[area.color,area.color+"cc",area.color+"99",area.color+"77",area.color+"55"];
-  const withCoords=clients.filter(c=>c.lat&&c.lon&&!isNaN(c.lat)&&!isNaN(c.lon));
+  const withGeom=clients.filter(c=>c.geometry);
+  const withPoints=clients.filter(c=>c.lat&&c.lon&&!isNaN(c.lat)&&!isNaN(c.lon)&&!c.geometry);
+  const withCoords=clients.filter(c=>(c.lat&&c.lon&&!isNaN(c.lat)&&!isNaN(c.lon))||c.geometry);
+
   if(!withCoords.length){
     return(
       <div style={{background:C.bg3,borderRadius:10,padding:32,textAlign:"center",border:`1px dashed ${C.border2}`}}>
         <div style={{fontSize:32,marginBottom:12}}>🗺️</div>
         <div style={{fontSize:13,fontWeight:700,color:C.text,marginBottom:8}}>Mapa não disponível</div>
         <div style={{fontSize:11,color:C.text2,lineHeight:1.7,maxWidth:400,margin:"0 auto"}}>
-          Seu arquivo não contém colunas de coordenadas geográficas.<br/>
-          Adicione as colunas <strong style={{color:area.color}}>latitude</strong> e <strong style={{color:area.color}}>longitude</strong> para visualizar no mapa.
-        </div>
-        <div style={{marginTop:16,background:C.bg2,borderRadius:8,padding:"10px 14px",fontFamily:"monospace",fontSize:11,color:C.text2,display:"inline-block"}}>
-          {area.csvCols}
+          Sem coordenadas geográficas no arquivo.<br/>
+          Para CSV/Excel: adicione <strong style={{color:area.color}}>latitude</strong> e <strong style={{color:area.color}}>longitude</strong>.<br/>
+          Para geometria vetorial: use um <strong style={{color:area.color}}>Shapefile (.shp + .dbf)</strong>.
         </div>
       </div>
     );
   }
-  const centerLat=withCoords.reduce((s,c)=>s+c.lat,0)/withCoords.length;
-  const centerLon=withCoords.reduce((s,c)=>s+c.lon,0)/withCoords.length;
+
+  const allLats=withCoords.map(c=>c.lat).filter(Boolean);
+  const allLons=withCoords.map(c=>c.lon).filter(Boolean);
+  const centerLat=allLats.length?allLats.reduce((a,b)=>a+b,0)/allLats.length:-15;
+  const centerLon=allLons.length?allLons.reduce((a,b)=>a+b,0)/allLons.length:-50;
+
+  const geojsonData=withGeom.length?{type:"FeatureCollection",features:withGeom.map(c=>({type:"Feature",geometry:c.geometry,properties:{id:c.id,segIdx:c.segIdx}}))}:null;
+
+  const getStyle=feature=>{
+    const segIdx=feature.properties?.segIdx??2;
+    return{fillColor:colors[segIdx]||area.color,weight:1.5,opacity:0.9,color:colors[segIdx]||area.color,fillOpacity:0.6};
+  };
+
+  const onEachFeature=(feature,layer)=>{
+    const c=clients.find(c=>c.id===feature.properties?.id);
+    if(c) layer.bindPopup(`<div style="font-family:system-ui;font-size:12px;min-width:150px"><b style="color:${colors[c.segIdx]}">${c.id}</b><br/><b>Segmento:</b> ${area.segmentos[c.segIdx]}<br/><b>Recência:</b> ${c.rec}d<br/><b>Frequência:</b> ${c.freq}x<br/><b>Valor:</b> ${fK(c.mon)}</div>`);
+  };
+
   return(
     <div style={{borderRadius:10,overflow:"hidden",border:`1px solid ${C.border}`}}>
-      <MapContainer center={[centerLat,centerLon]} zoom={5} style={{height:420,width:"100%"}} zoomControl={false}>
+      <MapContainer center={[centerLat,centerLon]} zoom={5} style={{height:440,width:"100%"}} zoomControl={false}>
         <TileLayer url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png" attribution='&copy; CARTO'/>
         <ZoomControl position="bottomright"/>
-        {withCoords.map(c=>(
+        {geojsonData&&<GeoJSON data={geojsonData} style={getStyle} onEachFeature={onEachFeature}/>}
+        {withPoints.map(c=>(
           <CircleMarker key={c.id} center={[c.lat,c.lon]} radius={6+c.freq*0.5}
             fillColor={colors[c.segIdx]||area.color} color={colors[c.segIdx]||area.color}
             weight={2} opacity={0.9} fillOpacity={0.7}>
@@ -374,18 +446,13 @@ function GeoMap({clients,area}){
                 <div><strong>Recência:</strong> {c.rec} dias</div>
                 <div><strong>Frequência:</strong> {c.freq}x</div>
                 <div><strong>Valor:</strong> {fK(c.mon)}</div>
-                <div style={{display:"flex",gap:6,marginTop:6}}>
-                  {[["R",c.rs],["F",c.fs],["M",c.ms]].map(([l,v])=>(
-                    <span key={l} style={{fontSize:10,padding:"1px 6px",borderRadius:6,background:colors[c.segIdx]+"33",color:colors[c.segIdx]||area.color,fontWeight:700}}>{l}:{v}</span>
-                  ))}
-                </div>
               </div>
             </Popup>
           </CircleMarker>
         ))}
       </MapContainer>
       <div style={{padding:"8px 12px",background:C.bg3,display:"flex",gap:12,flexWrap:"wrap",alignItems:"center"}}>
-        <span style={{fontSize:10,color:C.text3}}>{withCoords.length} áreas no mapa</span>
+        <span style={{fontSize:10,color:C.text3}}>{withCoords.length} feições {withGeom.length>0?`· ${withGeom.length} polígonos`:""}</span>
         {area.segmentos.map((s,i)=>(
           <span key={s} style={{fontSize:10,display:"flex",alignItems:"center",gap:4,color:C.text2}}>
             <span style={{width:8,height:8,borderRadius:"50%",background:colors[i],display:"inline-block"}}/>{s}
@@ -399,23 +466,29 @@ function GeoMap({clients,area}){
 // ── Upload Screen ──
 function UploadScreen({area,onFile,onBack}){
   const [drag,setDrag]=useState(false);
+  const [shpFile,setShpFile]=useState(null);
+  const [dbfFile,setDbfFile]=useState(null);
   const fileRef=useRef();
+  const shpRef=useRef();
+  const dbfRef=useRef();
 
-  const handle=f=>{
+  const handleSingle=f=>{
     if(!f)return;
     const ext=f.name.split(".").pop().toLowerCase();
-    if(ext==="csv"){
-      const r=new FileReader();
-      r.onload=ev=>onFile(ev.target.result,"csv",f.name);
-      r.readAsText(f);
-    } else if(ext==="xlsx"||ext==="xls"){
-      const r=new FileReader();
-      r.onload=ev=>onFile(ev.target.result,"excel",f.name);
-      r.readAsArrayBuffer(f);
-    } else {
-      alert("Formato não suportado. Use CSV ou Excel (.xlsx)");
-    }
+    if(ext==="csv"){const r=new FileReader();r.onload=ev=>onFile(ev.target.result,"csv",f.name);r.readAsText(f);}
+    else if(ext==="xlsx"||ext==="xls"){const r=new FileReader();r.onload=ev=>onFile(ev.target.result,"excel",f.name);r.readAsArrayBuffer(f);}
+    else if(ext==="shp"){setShpFile(f);}
+    else if(ext==="dbf"){setDbfFile(f);}
+    else{alert("Use CSV, Excel (.xlsx) ou Shapefile (.shp + .dbf)");}
   };
+
+  useEffect(()=>{
+    if(shpFile&&dbfFile){
+      const rShp=new FileReader(),rDbf=new FileReader();
+      rShp.onload=evShp=>{rDbf.onload=evDbf=>{onFile({shp:evShp.target.result,dbf:evDbf.target.result},"shapefile",shpFile.name);};rDbf.readAsArrayBuffer(dbfFile);};
+      rShp.readAsArrayBuffer(shpFile);
+    }
+  },[shpFile,dbfFile]);
 
   return(
     <div style={{minHeight:"100vh",background:C.bg,fontFamily:"system-ui,sans-serif",color:C.text,display:"flex",flexDirection:"column"}}>
@@ -429,7 +502,7 @@ function UploadScreen({area,onFile,onBack}){
       </div>
 
       <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
-        <div style={{width:"100%",maxWidth:600,display:"flex",flexDirection:"column",gap:16}}>
+        <div style={{width:"100%",maxWidth:640,display:"flex",flexDirection:"column",gap:14}}>
           {/* Info área */}
           <div style={{background:C.panel,border:`1px solid ${area.color}44`,borderRadius:14,padding:"16px 20px",borderLeft:`4px solid ${area.color}`}}>
             <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
@@ -446,40 +519,36 @@ function UploadScreen({area,onFile,onBack}){
             </div>
           </div>
 
-          {/* Drop zone */}
-          <div onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)}
-            onDrop={e=>{e.preventDefault();setDrag(false);handle(e.dataTransfer.files[0]);}}
-            onClick={()=>fileRef.current.click()}
-            style={{border:`2px dashed ${drag?area.color:C.border2}`,borderRadius:14,padding:"36px 24px",textAlign:"center",cursor:"pointer",background:drag?`${area.color}08`:C.panel,transition:".2s"}}>
-            <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" style={{display:"none"}} onChange={e=>handle(e.target.files[0])}/>
-            <div style={{fontSize:36,marginBottom:10}}>📁</div>
-            <div style={{fontSize:15,fontWeight:700,marginBottom:8}}>Arraste seu arquivo aqui ou clique</div>
-            {/* Formatos suportados */}
-            <div style={{display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>
-              {[
-                {ext:"CSV",icon:"📄",color:C.green,desc:"Valores separados por vírgula"},
-                {ext:"XLSX",icon:"📊",color:"#1D6F42",desc:"Microsoft Excel"},
-                {ext:"XLS",icon:"📊",color:"#1D6F42",desc:"Excel legado"},
-              ].map(f=>(
-                <div key={f.ext} style={{background:C.bg3,border:`1px solid ${f.color}44`,borderRadius:8,padding:"6px 12px",display:"flex",alignItems:"center",gap:6}}>
-                  <span style={{fontSize:14}}>{f.icon}</span>
-                  <div>
-                    <div style={{fontSize:11,fontWeight:700,color:f.color}}>{f.ext}</div>
-                    <div style={{fontSize:9,color:C.text3}}>{f.desc}</div>
-                  </div>
+          {/* Formatos */}
+          <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:10}}>
+            {/* CSV/Excel */}
+            <div style={{background:C.panel,border:`1px solid ${C.border}`,borderRadius:12,padding:14}}>
+              <div style={{fontSize:11,fontWeight:700,color:C.text,marginBottom:8}}>📄 CSV ou 📊 Excel</div>
+              <div onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)}
+                onDrop={e=>{e.preventDefault();setDrag(false);handleSingle(e.dataTransfer.files[0]);}}
+                onClick={()=>fileRef.current.click()}
+                style={{border:`2px dashed ${drag?area.color:C.border2}`,borderRadius:10,padding:"24px",textAlign:"center",cursor:"pointer",background:drag?`${area.color}08`:C.bg3,transition:".2s"}}>
+                <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" style={{display:"none"}} onChange={e=>handleSingle(e.target.files[0])}/>
+                <div style={{fontSize:28,marginBottom:6}}>📁</div>
+                <div style={{fontSize:12,fontWeight:600,marginBottom:4}}>Arraste ou clique</div>
+                <div style={{fontSize:10,color:C.text3}}>.csv · .xlsx · .xls</div>
+              </div>
+            </div>
+            {/* Shapefile */}
+            <div style={{background:C.panel,border:`1px solid ${C.border}`,borderRadius:12,padding:14}}>
+              <div style={{fontSize:11,fontWeight:700,color:C.text,marginBottom:8}}>🗂️ Shapefile</div>
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                <div onClick={()=>shpRef.current.click()} style={{border:`1px dashed ${shpFile?area.color:C.border2}`,borderRadius:8,padding:"12px",textAlign:"center",cursor:"pointer",background:shpFile?`${area.color}12`:C.bg3,fontSize:11}}>
+                  <input ref={shpRef} type="file" accept=".shp" style={{display:"none"}} onChange={e=>handleSingle(e.target.files[0])}/>
+                  {shpFile?<span style={{color:area.color,fontSize:10}}>✅ {shpFile.name}</span>:<span style={{color:C.text3}}>📎 Selecionar .shp</span>}
                 </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Formato */}
-          <div style={{background:C.panel,border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px"}}>
-            <div style={{fontSize:11,fontWeight:700,color:area.color,marginBottom:6}}>📋 Colunas esperadas:</div>
-            <div style={{fontFamily:"monospace",fontSize:11,color:C.text2,background:C.bg3,borderRadius:8,padding:"8px 12px",marginBottom:8}}>
-              {area.csvCols}
-            </div>
-            <div style={{fontSize:10,color:C.text3}}>
-              ✅ Detecção automática de colunas · ✅ Com ou sem coordenadas · ✅ Qualquer quantidade de registros
+                <div onClick={()=>dbfRef.current.click()} style={{border:`1px dashed ${dbfFile?area.color:C.border2}`,borderRadius:8,padding:"12px",textAlign:"center",cursor:"pointer",background:dbfFile?`${area.color}12`:C.bg3,fontSize:11}}>
+                  <input ref={dbfRef} type="file" accept=".dbf" style={{display:"none"}} onChange={e=>handleSingle(e.target.files[0])}/>
+                  {dbfFile?<span style={{color:area.color,fontSize:10}}>✅ {dbfFile.name}</span>:<span style={{color:C.text3}}>📎 Selecionar .dbf</span>}
+                </div>
+                {shpFile&&dbfFile&&<div style={{fontSize:10,color:area.color,textAlign:"center",fontWeight:700,padding:"6px",background:`${area.color}12`,borderRadius:6}}>🔄 Processando...</div>}
+                {(shpFile||dbfFile)&&!(shpFile&&dbfFile)&&<div style={{fontSize:9,color:C.text3,textAlign:"center"}}>Selecione os dois arquivos</div>}
+              </div>
             </div>
           </div>
 
@@ -493,6 +562,9 @@ function UploadScreen({area,onFile,onBack}){
                 </span>
               ))}
             </div>
+          </div>
+          <div style={{background:C.panel,border:`1px solid ${C.border}`,borderRadius:12,padding:"10px 16px"}}>
+            <div style={{fontSize:10,color:C.text3}}>✅ Detecção automática de colunas · ✅ CSV, Excel e Shapefile · ✅ Com ou sem coordenadas · ✅ Exporta GeoJSON</div>
           </div>
         </div>
       </div>
@@ -515,7 +587,7 @@ function AreaSelector({onSelect}){
         <div style={{position:"absolute",inset:0,backgroundImage:`linear-gradient(${C.blue}08 1px,transparent 1px),linear-gradient(90deg,${C.blue}08 1px,transparent 1px)`,backgroundSize:"40px 40px"}}/>
         <div style={{position:"relative",zIndex:1}}>
           <div style={{display:"inline-flex",alignItems:"center",gap:7,background:`rgba(37,99,235,.1)`,border:`1px solid rgba(37,99,235,.3)`,borderRadius:20,padding:"5px 16px",fontSize:11,color:C.cyan,marginBottom:16}}>
-            🛰️ Deep Learning · Leaflet.js · CSV · Excel · 100% no Navegador
+            🛰️ Deep Learning · Leaflet.js · CSV · Excel · Shapefile · 100% no Navegador
           </div>
           <h1 style={{fontSize:"clamp(22px,4vw,38px)",fontWeight:800,marginBottom:10,lineHeight:1.2}}>
             <span style={{color:C.text}}>Análise Geoespacial</span><br/>
@@ -525,7 +597,7 @@ function AreaSelector({onSelect}){
             Selecione a área, faça upload do seu CSV ou Excel e obtenha segmentação automática com gráficos e mapa interativo.
           </p>
           <div style={{display:"flex",gap:10,justifyContent:"center",flexWrap:"wrap",marginBottom:8}}>
-            {[["📄","CSV"],["📊","Excel .xlsx"],["🗺️","Mapa Interativo"],["🤖","KMeans JS"],["📈","7 Gráficos"]].map(([ic,lb])=>(
+            {[["📄","CSV"],["📊","Excel"],["🗂️","Shapefile"],["🗺️","Mapa Vetorial"],["📈","7 Gráficos"],["↓","GeoJSON"]].map(([ic,lb])=>(
               <span key={lb} style={{fontSize:11,color:C.text2,display:"flex",alignItems:"center",gap:4,background:C.panel,border:`1px solid ${C.border}`,borderRadius:20,padding:"4px 12px"}}>
                 <span>{ic}</span>{lb}
               </span>
@@ -829,28 +901,29 @@ function Dashboard({clients,area,csvName,fileType,hasCoords,onNewFile,onBack}){
 export default function App(){
   const [area,setArea]=useState(null);
   const [clients,setClients]=useState([]);
-  const [csvName,setCsvName]=useState("");
+  const [fileName,setFileName]=useState("");
   const [fileType,setFileType]=useState("csv");
   const [hasCoords,setHasCoords]=useState(false);
+  const [hasGeom,setHasGeom]=useState(false);
   const [loading,setLoading]=useState(false);
   const [error,setError]=useState("");
 
-  const handleFile=(data,type,name)=>{
+  const handleFile=async(data,type,name)=>{
     setLoading(true);setError("");
     try{
       let rows=[];
-      if(type==="csv"){
-        rows=parseCSV(data);
-      } else if(type==="excel"){
-        rows=parseExcel(new Uint8Array(data));
-      }
+      const isShp=type==="shapefile";
+      if(type==="csv") rows=parseCSV(data);
+      else if(type==="excel") rows=parseExcel(new Uint8Array(data));
+      else if(isShp) rows=await parseShapefile(data.shp,data.dbf);
       if(!rows.length){setError("Arquivo sem dados válidos.");setLoading(false);return;}
       const cols=detectCols(rows);
-      if(!cols.idCol||!cols.dateCol||!cols.valCol){setError("Não foi possível identificar as colunas. Verifique o formato.");setLoading(false);return;}
-      const built=buildClients(rows,cols,5);
+      if(!cols.idCol){setError("Não foi possível identificar a coluna de ID.");setLoading(false);return;}
+      const built=buildClients(rows,cols,5,isShp);
       if(!built.length){setError("Nenhum dado válido encontrado.");setLoading(false);return;}
-      const coords=built.some(c=>c.lat&&c.lon);
-      setClients(built);setCsvName(name);setFileType(type);setHasCoords(coords);
+      setClients(built);setFileName(name);setFileType(type);
+      setHasCoords(built.some(c=>c.lat&&c.lon));
+      setHasGeom(built.some(c=>c.geometry));
     }catch(e){setError("Erro ao processar arquivo: "+e.message);}
     setLoading(false);
   };
@@ -870,7 +943,7 @@ export default function App(){
       {error&&<div style={{position:"fixed",bottom:20,left:"50%",transform:"translateX(-50%)",background:C.red,color:"#fff",padding:"10px 20px",borderRadius:10,fontSize:12,fontWeight:600,zIndex:9999}}>{error}</div>}
     </>
   );
-  return <Dashboard clients={clients} area={area} csvName={csvName} fileType={fileType} hasCoords={hasCoords}
+  return <Dashboard clients={clients} area={area} csvName={fileName} fileType={fileType} hasCoords={hasCoords}
     onNewFile={()=>setClients([])}
-    onBack={()=>{setArea(null);setClients([]);setCsvName("");setHasCoords(false);}}/>;
+    onBack={()=>{setArea(null);setClients([]);setFileName("");setHasCoords(false);setHasGeom(false);}}/>;
 }
