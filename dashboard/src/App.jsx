@@ -163,7 +163,7 @@ function detectCols(rows) {
 
 function buildClients(rows, cols, k=5, isShapefile=false) {
   const { idCol, dateCol, valCol, latCol, lonCol } = cols;
-  const map = {}, now = new Date("2024-12-31");
+  const map = {}, now = new Date();
   rows.forEach(r => {
     const id = r[idCol];
     if (!id) return;
